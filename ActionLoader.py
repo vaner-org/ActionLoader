@@ -255,11 +255,14 @@ class ACTION_UL_list(bpy.types.UIList):
 	def draw_item(self, context, layout, data, item, icon, active_data, active_propname):
 		self.use_filter_show = True
 		
-		if item.get("frame_end") == None:
-				durationf = 0
-				durations = 0
-		else:
-			durationf = item["frame_end"] - item["frame_start"]
+		try:
+			if "frame_end" in item and "frame_start" in item:
+				durationf = item["frame_end"] - item["frame_start"]
+			else:
+				durationf = item.frame_range[1] - item.frame_range[0]
+		except:
+			durationf = 0
+		durations = durationf / bpy.context.scene.render.fps if durationf > 0 else 0
 			
 		# Draw Info!  
 		durations = durationf / bpy.context.scene.render.fps 
@@ -358,13 +361,15 @@ class ActionLoaderPanel(bpy.types.Panel):
 					fakeuser= " [F]" 
 				else:
 					fakeuser= " [x]"
-				if AA.get("frame_end") == None:
+				try:
+					if "frame_end" in AA and "frame_start" in AA:
+						durationf = AA["frame_end"] - AA["frame_start"]
+					else:
+						durationf = AA.frame_range[1] - AA.frame_range[0]
+				except:
 					durationf = 0
-					durations = 0
-				else:
-					durationf = AA["frame_end"] - AA["frame_start"]
-
-				durations = durationf / bpy.context.scene.render.fps 
+				durations = durationf / bpy.context.scene.render.fps if durationf > 0 else 0
+				
 				info1 = AA.name 
 				info2 = str(durationf)+ " f. | "+ str(round(durations,6))+ " s. "
 				
