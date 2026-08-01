@@ -1,8 +1,8 @@
 bl_info = {
 	"name": "Action Loader",
 	"author": "Frederico Martins, modified by vaner",
-	"version": (5, 0),
-	"blender": (4, 0, 2),
+	"version": (5, 1),
+	"blender": (5, 1, 0),
 	"location": "View3D > Tools > Animation",
 	"description": "Toolbars for smoother management of Actions",
 	"warning": "",
@@ -14,11 +14,83 @@ bl_info = {
 import bpy
 import inspect
 import sys
+from bpy_extras import anim_utils
 global extra_info
 extra_info = False
 
 filter_name = ''
 filter_name2 = ''
+
+
+def get_action_fcurves(action, slot=None):
+	# Return the F-Curves belonging to an action, for a given slot.
+
+	# Legacy API (Blender < 5.0): Action still has a direct fcurves property.
+	if hasattr(action, "fcurves"):
+		return action.fcurves
+
+	# New (slotted) API: fcurves live in a Channelbag tied to a slot.
+	if slot is None and action.slots:
+		slot = action.slots[0]
+
+	if slot is None:
+		return []
+
+	channelbag = anim_utils.action_get_channelbag_for_slot(action, slot)
+	if channelbag is None:
+		return []
+
+	return channelbag.fcurves
+
+
+def assign_action(ob, action):
+	# Assign an action to an object, making sure a compatible slot is attached too.
+	
+	ob.animation_data.action = action
+	if action is None:
+		return
+	anim_data = ob.animation_data
+	if getattr(anim_data, "action_slot", None) is not None:
+		return
+	suitable_slots = getattr(anim_data, "action_suitable_slots", None)
+	if suitable_slots:
+		anim_data.action_slot = suitable_slots[0]
+
+
+def iter_all_strips(seq_editor):
+	"""Yield every strip in the Sequencer, including ones nested in meta
+	strips.
+
+	Blender 5.0 renamed SequenceEditor.sequences_all to
+	SequenceEditor.strips_all (part of the Sequence -> Strip rename).
+	Try the current name first, fall back to the old one for Blender < 5.0.
+	"""
+
+	# Blender 5.0 renamed SequenceEditor.sequences_all to SequenceEditor.strips_all
+	all_strips = getattr(seq_editor, "strips_all", None)
+	if all_strips is None:
+		all_strips = getattr(seq_editor, "sequences_all", None)
+	if all_strips is not None:
+		for strip in all_strips:
+			yield strip
+		return
+
+	top_level = getattr(seq_editor, "strips", None)
+	if top_level is None:
+		top_level = getattr(seq_editor, "sequences", None)
+	if top_level is None:
+		return
+
+	def recurse(strips):
+		for strip in strips:
+			yield strip
+			children = getattr(strip, "strips", None)
+			if children is None:
+				children = getattr(strip, "sequences", None)
+			if children:
+				yield from recurse(children)
+
+	yield from recurse(top_level)
 
 
 def set_prevspeed(self, value):
@@ -142,12 +214,12 @@ def update_action_list(self, context):
 
 	# Apply reset action first if enabled
 	if scn.actionloader_useReset and scn.actionloader_resetAction:
-		ob.animation_data.action = scn.actionloader_resetAction
+		assign_action(ob, scn.actionloader_resetAction)
 		# Update the scene to apply the reset action
 		bpy.context.view_layer.update()
 
 	#then change the action to the picked on the list
-	ob.animation_data.action = bpy.data.actions[ob.action_list_index]
+	assign_action(ob, bpy.data.actions[ob.action_list_index])
 
 	ActiveAction = context.active_object.animation_data.action
 	ActiveAction.use_fake_user = True
@@ -367,7 +439,7 @@ class OBJECT_OT_DuplicateAction(bpy.types.Operator):
 			newAnim = bpy.data.actions[scn.action_list_index].copy()
 		else:
 			newAnim = bpy.data.actions[bpy.context.object.action_list_index].copy()
-			ob.animation_data.action = newAnim
+			assign_action(ob, newAnim)
 			quickfix_index()
 		return{'FINISHED'}   
 
@@ -412,7 +484,7 @@ class OBJECT_OT_MakeExclusive(bpy.types.Operator):
 
 		# Unlink from scene sequence editor strips
 		if bpy.context.scene.sequence_editor:
-			for seq in bpy.context.scene.sequence_editor.sequences_all:
+			for seq in iter_all_strips(bpy.context.scene.sequence_editor):
 				if hasattr(seq, 'action') and seq.action == current_action:
 					seq.action = None
 
@@ -474,16 +546,18 @@ class OBJECT_OT_SetKeyframeRange(bpy.types.Operator):
 			return {'CANCELLED'}
 
 		ActiveAction = ob.animation_data.action
+		ActiveSlot = getattr(ob.animation_data, "action_slot", None)
+		fcurves = get_action_fcurves(ActiveAction, ActiveSlot)
 
 		# Get the actual keyframe range by calculating from fcurves
-		if len(ActiveAction.fcurves) == 0:
+		if len(fcurves) == 0:
 			self.report({'WARNING'}, "Action has no keyframes")
 			return {'CANCELLED'}
 
 		start_frame = None
 		end_frame = None
 
-		for fcurve in ActiveAction.fcurves:
+		for fcurve in fcurves:
 			for keyframe in fcurve.keyframe_points:
 				frame = keyframe.co[0]
 				if start_frame is None or frame < start_frame:
@@ -617,4 +691,3 @@ def unregister():
 
 if __name__ == "__main__":
 	register()
-	
