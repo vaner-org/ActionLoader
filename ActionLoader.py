@@ -1,7 +1,7 @@
 bl_info = {
 	"name": "Action Loader",
 	"author": "Frederico Martins, modified by vaner",
-	"version": (5, 1),
+	"version": (5, 2),
 	"blender": (5, 1, 0),
 	"location": "View3D > Tools > Animation",
 	"description": "Toolbars for smoother management of Actions",
@@ -20,6 +20,103 @@ extra_info = False
 
 filter_name = ''
 filter_name2 = ''
+
+
+# ---------------------------------------------------------------------------
+# Fuzzy search for the action lists
+# ---------------------------------------------------------------------------
+
+def _fuzzy_word_score(word, text):
+	"""Score one search word against a name. Returns None if it doesn't match.
+
+	The word's characters must appear in the name in order, but not
+	necessarily next to each other ("wlkcyc" matches "Walk_Cycle").
+	Higher score = better match: consecutive characters, matches at the
+	start of words (after _ . - space, or at camelCase humps), and plain
+	substring hits all score extra; big gaps between characters cost points.
+	"""
+	low = text.lower()
+	word = word.lower()
+
+	score = 0
+	pos = 0
+	prev = -1
+	for ch in word:
+		idx = low.find(ch, pos)
+		if idx == -1:
+			return None
+		if prev >= 0:
+			if idx == prev + 1:
+				score += 5                          # consecutive chars
+			else:
+				score -= min(idx - prev - 1, 5)     # gap penalty
+		if idx == 0 or not text[idx - 1].isalnum():
+			score += 8                              # start of a word
+		elif text[idx - 1].islower() and text[idx].isupper():
+			score += 6                              # camelCase hump
+		prev = idx
+		pos = idx + 1
+
+	# Bonus for exact substring hits
+	if word in low:
+		score += 20
+		if low.startswith(word):
+			score += 10
+
+	return score
+
+
+def fuzzy_score(query, text):
+	"""Score a (possibly multi-word) query against a name. Every
+	space-separated word has to match. Returns None for no match."""
+	total = 0
+	for word in query.split():
+		s = _fuzzy_word_score(word, text)
+		if s is None:
+			return None
+		total += s
+	return total
+
+
+def fuzzy_filter_items(ui_list, data, propname):
+	"""Shared filter_items() implementation for the action lists.
+
+	Returns (flt_flags, flt_neworder) as Blender expects: matches are
+	flagged visible and sorted best-first. With an empty filter it behaves
+	like the stock list (optionally sorted alphabetically).
+	"""
+	items = getattr(data, propname)
+	flags = [0] * len(items)
+	neworder = []
+
+	query = ui_list.filter_name.strip()
+	invert = ui_list.use_filter_invert
+
+	if query:
+		scores = {}
+		for i, item in enumerate(items):
+			s = fuzzy_score(query, item.name)
+			if s is not None:
+				scores[i] = s
+		for i in range(len(items)):
+			if (i in scores) != invert:
+				flags[i] = ui_list.bitflag_filter_item
+		if not invert:
+			if ui_list.use_filter_sort_alpha:
+				ranked = sorted(scores, key=lambda i: items[i].name.lower())
+			else:
+				ranked = sorted(scores, key=lambda i: -scores[i])
+			neworder = [0] * len(items)
+			rest = [i for i in range(len(items)) if i not in scores]
+			for new_pos, orig in enumerate(ranked + rest):
+				neworder[orig] = new_pos
+	else:
+		for i in range(len(items)):
+			flags[i] = ui_list.bitflag_filter_item
+		if ui_list.use_filter_sort_alpha:
+			neworder = bpy.types.UI_UL_list.sort_items_by_name(items, "name")
+
+	return flags, neworder
 
 
 def get_action_fcurves(action, slot=None):
@@ -272,6 +369,9 @@ class ACTION_UL_list2(bpy.types.UIList):
 			pass
 		global filter_name2
 		filter_name2 = self.filter_name
+
+	def filter_items(self, context, data, propname):
+		return fuzzy_filter_items(self, data, propname)
 		
 class ACTION_UL_list(bpy.types.UIList):
 	def draw_item(self, context, layout, data, item, icon, active_data, active_propname):
@@ -307,6 +407,9 @@ class ACTION_UL_list(bpy.types.UIList):
 			pass
 		global filter_name
 		filter_name = self.filter_name
+
+	def filter_items(self, context, data, propname):
+		return fuzzy_filter_items(self, data, propname)
 
 
 class ActionLoaderPanel(bpy.types.Panel):
