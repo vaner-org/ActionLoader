@@ -1,7 +1,7 @@
 bl_info = {
 	"name": "Action Loader",
 	"author": "Frederico Martins, modified by vaner",
-	"version": (5, 2),
+	"version": (5, 3),
 	"blender": (5, 1, 0),
 	"location": "View3D > Tools > Animation",
 	"description": "Toolbars for smoother management of Actions",
@@ -140,6 +140,48 @@ def get_action_fcurves(action, slot=None):
 	return channelbag.fcurves
 
 
+# ---------------------------------------------------------------------------
+# Slot selection (slot affinity + unassigned-slot preference)
+# ---------------------------------------------------------------------------
+
+def get_slot_affinity(ob):
+	# Roles from the object's "slot_affinity" custom property, in order.
+	# "hold, attacker" -> ["hold", "attacker"]
+	value = ob.get("slot_affinity", "")
+	if not isinstance(value, str):
+		return []
+	return [r.strip() for r in value.split(",") if r.strip()]
+
+
+def _slot_label(slot):
+	# The slot's display name, as shown in the Action Editor's slot dropdown.
+	return getattr(slot, "name_display", None) or slot.identifier
+
+
+def _slot_is_unassigned(slot, ob):
+	# True if no data-block other than `ob` is using this slot.
+	try:
+		users = slot.users()
+	except AttributeError:
+		return True   # very old API without slot.users(); don't filter
+	ob_ptr = ob.as_pointer()
+	return all(u.as_pointer() == ob_ptr for u in users)
+
+
+def _pick_affinity_slot(ob, slots):
+	# First role (left to right) that exactly matches a slot's name wins.
+	# If several slots share that name, prefer one nobody else is using.
+	for role in get_slot_affinity(ob):
+		matches = [s for s in slots if _slot_label(s) == role]
+		if not matches:
+			continue
+		for slot in matches:
+			if _slot_is_unassigned(slot, ob):
+				return slot
+		return matches[0]
+	return None
+
+
 def assign_action(ob, action):
 	# Assign an action to an object, making sure a compatible slot is attached too.
 	
@@ -147,11 +189,27 @@ def assign_action(ob, action):
 	if action is None:
 		return
 	anim_data = ob.animation_data
+	suitable_slots = getattr(anim_data, "action_suitable_slots", None)
+	if not suitable_slots:
+		return
+
+	# 1. Slot affinity (if enabled) wins, even over the slot Blender auto-picked.
+	if bpy.context.scene.actionloader_useSlotAffinity:
+		preferred = _pick_affinity_slot(ob, suitable_slots)
+		if preferred is not None:
+			anim_data.action_slot = preferred
+			return
+
+	# 2. Otherwise keep whatever slot Blender already chose.
 	if getattr(anim_data, "action_slot", None) is not None:
 		return
-	suitable_slots = getattr(anim_data, "action_suitable_slots", None)
-	if suitable_slots:
-		anim_data.action_slot = suitable_slots[0]
+
+	# 3. Otherwise first unassigned suitable slot, falling back to the first one.
+	for slot in suitable_slots:
+		if _slot_is_unassigned(slot, ob):
+			anim_data.action_slot = slot
+			return
+	anim_data.action_slot = suitable_slots[0]
 
 
 def iter_all_strips(seq_editor):
@@ -527,6 +585,13 @@ class ActionLoaderOnSelectionPanel(bpy.types.Panel):
 		if scn.actionloader_useReset:
 			layout.prop(scn, "actionloader_resetAction", text="")
 
+		layout.prop(scn, "actionloader_useSlotAffinity", text="Prefer slots named...")
+		if scn.actionloader_useSlotAffinity:
+			# Stored in the active object's "slot_affinity" custom property
+			row = layout.row()
+			row.enabled = context.active_object is not None
+			row.prop(scn, "actionloader_slotAffinity", text="", placeholder="slots,this,object,prefers")
+
 
 class OBJECT_OT_DuplicateAction(bpy.types.Operator):
 	"""Duplicate action"""
@@ -720,6 +785,27 @@ def quickfix_index():
 			bpy.context.object.action_list_index = x  
 
 
+def _get_slot_affinity_ui(self):
+	# The field shows the active object's "slot_affinity" custom property.
+	ob = bpy.context.active_object
+	if ob is None:
+		return ""
+	value = ob.get("slot_affinity", "")
+	return value if isinstance(value, str) else str(value)
+
+
+def _set_slot_affinity_ui(self, value):
+	# Writes to the active object's custom property; an empty field removes it.
+	ob = bpy.context.active_object
+	if ob is None:
+		return
+	value = value.strip()
+	if value:
+		ob["slot_affinity"] = value
+	elif "slot_affinity" in ob:
+		del ob["slot_affinity"]
+
+
 def register():
 	bpy.types.Scene.actionloader_DualView = bpy.props.BoolProperty(default= False, description = "Two List of the Actions so you can have different filters on each. Doesn't affect or change anything in the scene, just for listing.")
 	
@@ -772,6 +858,20 @@ def register():
 		name = "Reset Action",
 		description = "The action to apply before switching to another action"
 		)
+	bpy.types.Scene.actionloader_useSlotAffinity = bpy.props.BoolProperty(
+		name = "Prefer slots named...",
+		description = "When assigning an action, prefer a slot whose name exactly matches one of the "
+					  "roles in the active object's 'slot_affinity' custom property",
+		default = False
+		)
+	bpy.types.Scene.actionloader_slotAffinity = bpy.props.StringProperty(
+		name = "Slot affinity",
+		description = "Comma-separated roles (e.g. holder,attacker). Stored in the active object's "
+					  "'slot_affinity' custom property. A slot whose name exactly matches one of "
+					  "these roles is preferred; earlier roles take priority",
+		get = _get_slot_affinity_ui,
+		set = _set_slot_affinity_ui
+		)
 
 	module_classes = inspect.getmembers(sys.modules[__name__], inspect.isclass)
 	for cls in module_classes:
@@ -790,6 +890,8 @@ def unregister():
 	del bpy.types.Scene.actionloader_1stFrame
 	del bpy.types.Scene.actionloader_useReset
 	del bpy.types.Scene.actionloader_resetAction
+	del bpy.types.Scene.actionloader_slotAffinity
+	del bpy.types.Scene.actionloader_useSlotAffinity
 
 
 if __name__ == "__main__":
